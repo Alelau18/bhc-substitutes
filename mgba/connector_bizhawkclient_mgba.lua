@@ -467,7 +467,15 @@ function accept()
     if client == nil then
         client, err = server:accept()
         if err then
-            console:error(err)
+            -- A listener that cannot accept will not fix itself, and its callback
+            -- keeps firing every frame. Drop it so tick() builds a new one rather
+            -- than logging the same error forever.
+            if err ~= socket.ERRORS.AGAIN then
+                console:error("Listener failed ("..tostring(err).."), restarting it")
+                pcall(function() server:close() end)
+                server = nil
+            end
+
             return
         end
         console:log("Connected")
@@ -502,26 +510,44 @@ end
 function create_server()
     local result, err
 
-    server, err = socket.tcp()
-    if err then
-        console:log(err)
+    -- Build into a local and only publish it once it is actually listening.
+    -- Assigning `server` up front means a failed bind or listen leaves a dead
+    -- socket in place, and since tick() only rebuilds while `server` is nil the
+    -- connector never recovers.
+    local sock
+    sock, err = socket.tcp()
+
+    if sock == nil then
+        console:log("Could not create socket: "..tostring(err))
+        return
     end
 
     local port = SOCKET_PORT_FIRST
 
     while result == nil and port <= SOCKET_PORT_LAST do
-        result, err = server:bind("127.0.0.1", port)
+        result, err = sock:bind("127.0.0.1", port)
 
         if result == nil then  -- Two instances of mGBA don't conflict in this way. Unsure how to solve.
             port = port + 1
         end
     end
 
-    result, err = server:listen(0)
-    if err then
-        console:log(err)
+    if result == nil then
+        pcall(function() sock:close() end)
+        console:log("Could not bind a port in "..SOCKET_PORT_FIRST.."-"..SOCKET_PORT_LAST..
+                    "; will retry")
+        return
     end
 
+    result, err = sock:listen(0)
+
+    if result == nil then
+        pcall(function() sock:close() end)
+        console:log("Could not listen on port "..port.." ("..tostring(err).."); will retry")
+        return
+    end
+
+    server = sock
     console:log("Waiting for client to connect...")
 
     server:add("received", accept)
