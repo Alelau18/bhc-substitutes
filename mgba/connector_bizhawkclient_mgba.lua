@@ -397,22 +397,51 @@ function process_request (req)
     end
 end
 
+-- Closing the socket is not enough: tick() only reopens the listening socket
+-- while `client` is nil, and accept() closed the listener when this client
+-- connected -- so a stale handle leaves nothing listening at all.
+function drop_client()
+    pcall(function() client:close() end)
+    client = nil
+    last_activity = nil
+    console:log("Client disconnected")
+end
+
 function received()
     local buffer = ""
 
     if not client then return end
 
+    local drained = false
+
     while true do
         local piece, err = client:receive(1024)
         if piece then
             buffer = buffer..piece
+            drained = true
         else
             if err ~= socket.ERRORS.AGAIN then
-                client:close()
+                drop_client()
+                return
             end
 
             break
         end
+    end
+
+    if not drained then
+        -- Readable but nothing to read, which in practice means EOF: mGBA gates
+        -- this callback on hasdata(), and the one other way here -- a spurious
+        -- poll wakeup -- costs the client a reconnect at worst. Not redundant
+        -- with the branch above --
+        -- mGBA reports a zero-byte read via the socket's stored error, which
+        -- comes from SocketError() (the current errno), and a graceful EOF never
+        -- sets errno. A stale EAGAIN therefore makes a clean disconnect look
+        -- like ERRORS.AGAIN, and since a socket at EOF stays readable this
+        -- callback would re-fire every frame, refreshing last_activity and
+        -- starving the timeout that would otherwise recover.
+        drop_client()
+        return
     end
 
     last_activity = os.time()
@@ -452,9 +481,12 @@ function received()
     end
 end
 
+-- The socket 'error' event must release the handle the same way. Nilling
+-- `client` without closing it leaves the socket and its per-frame poll callback
+-- behind, re-dispatching this handler every frame for the rest of the session,
+-- and the stale last_activity could time out the next client on arrival.
 function error()
-    client = nil
-    console:log("Client disconnected")
+    drop_client()
 end
 
 function accept()
@@ -500,7 +532,9 @@ function tick()
             client = nil
             last_activity = nil
         else
-            while locked do
+            -- client:poll() dispatches received(), which may drop the
+            -- client mid-loop; re-test rather than polling a cleared handle.
+            while locked and client ~= nil do
                 client:poll()
             end
         end
