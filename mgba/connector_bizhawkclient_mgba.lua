@@ -94,6 +94,58 @@ local GBA_DOMAINS = {
     ["Combined WRAM"] = "wram",
 }
 
+-- Game Boy header byte 0x148 encodes the cartridge ROM size as 32 KiB << n.
+-- Read through the ordinary memory path, so it still answers in the moments
+-- where emu:romSize() does not. Values above 8 are not defined by the hardware.
+function rom_size_from_gb_header()
+    local success, code = pcall(function()
+        return get_memory_domain("ROM"):read8(0x148)
+    end)
+
+    if not success or type(code) ~= "number" or code > 8 then
+        return nil
+    end
+
+    return 32768 << code
+end
+
+-- mGBA snapshots each memory block's descriptor when the scripting context
+-- attaches, which happens before the reset that fills in the real ROM size
+-- (mgba-emu/mgba#3640, fixed for 0.11.0). So cart0:size() reports the 0x800000
+-- placeholder for every ROM after the first in a session, and clients that
+-- identify a game by its ROM size stop recognising it. emu:romSize() reads the
+-- loaded ROM's file handle and stays correct.
+function get_memory_domain_size(name)
+    if name == "ROM" then
+        local success, size = pcall(function() return emu:romSize() end)
+
+        if success and type(size) == "number" and size > 0 then
+            return size
+        end
+
+        if emu:platform() == C.PLATFORM.GB then
+            local from_header = rom_size_from_gb_header()
+
+            if from_header then
+                return from_header
+            end
+        end
+
+        -- Deliberately not the descriptor: its 0x800000 placeholder is a
+        -- plausible size, so every handler would reject the ROM with nothing to
+        -- show why. 0 is a size no real ROM has -- clients compare sizes during
+        -- validation and fail it softly, then retry on their next poll, and the
+        -- console names the failure. An ERROR response would be worse:
+        -- BizHawkClient's watcher task does not catch ConnectorError, so
+        -- raising here ends the client's sync for the whole session over what
+        -- is usually a transient.
+        console:error("Could not determine ROM size; reporting 0")
+        return 0
+    end
+
+    return get_memory_domain(name):size()
+end
+
 -- Resolves a domain against whichever core is loaded right now. Raises on an
 -- unknown or unavailable domain; process_request turns that into an ERROR.
 function get_memory_domain(name)
@@ -175,7 +227,7 @@ request_handlers = {
         local res = {}
 
         res["type"] = "MEMORY_SIZE_RESPONSE"
-        res["value"] = get_memory_domain(req["domain"]):size()
+        res["value"] = get_memory_domain_size(req["domain"])
         return res
     end,
 
