@@ -1,3 +1,18 @@
+> [!NOTE]
+> **This is a fork.** The upstream project is
+> [Zunawe/bhc-substitutes](https://github.com/Zunawe/bhc-substitutes); everything
+> below is theirs. The only change here is to the **mGBA** connector, which has
+> been patched so that **loading a different ROM mid-session works** — no
+> reloading the Lua script, no restarting the emulator. The client re-detects the
+> game; reconnect to the multiworld server (`/connect`) and items keep flowing.
+> (Stock Archipelago drops the server connection when the ROM changes and waits
+> for a manual reconnect — that part is client-side, not something a connector
+> can fix.)
+>
+> The mesen2 and pj64 connectors are untouched. See
+> [`mgba/README.md`](mgba/README.md) for what was fixed. These changes are
+> intended to go upstream.
+
 [Archipelago](https://archipelago.gg/)'s BizHawk Client communicates with
 [BizHawk](https://tasvideos.org/Bizhawk) by connecting to a Lua script that
 runs in the emulator. The client makes a few BizHawk-specific assumptions, but
