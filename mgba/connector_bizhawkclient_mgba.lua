@@ -63,8 +63,61 @@ local client = nil
 local last_activity
 
 local locked = false
-local platform = nil
-local memory_domains = nil
+
+-- `error` is redefined further down as this script's socket error handler, which
+-- shadows Lua's builtin for every call made after that point. Keep the real one.
+local raise = error
+
+-- BizHawk domain name -> mGBA `emu.memory` key.
+--
+-- Looked up per request rather than cached: mGBA destroys the core when a ROM is
+-- loaded, so a domain handle held across that boundary refers to a core that no
+-- longer exists.
+local GB_DOMAINS = {
+    ["ROM"] = "cart0",
+    ["VRAM"] = "vram",
+    ["SRAM"] = "sram",
+    ["CartRAM"] = "sram",
+    ["WRAM"] = "wram",
+    ["OAM"] = "oam",
+    ["IO"] = "io",
+    ["HRAM"] = "hram",
+}
+
+local GBA_DOMAINS = {
+    ["BIOS"] = "bios",
+    ["ROM"] = "cart0",
+    ["EWRAM"] = "wram",
+    ["IWRAM"] = "iwram",
+    ["VRAM"] = "vram",
+    ["OAM"] = "oam",
+    ["Combined WRAM"] = "wram",
+}
+
+-- Resolves a domain against whichever core is loaded right now. Raises on an
+-- unknown or unavailable domain; process_request turns that into an ERROR.
+function get_memory_domain(name)
+    if name == "System Bus" then
+        return emu
+    end
+
+    local domains = GB_DOMAINS
+    if emu:platform() ~= C.PLATFORM.GB then
+        domains = GBA_DOMAINS
+    end
+
+    local key = domains[name]
+    if key == nil then
+        raise("Unknown memory domain: "..tostring(name))
+    end
+
+    local domain = emu.memory[key]
+    if domain == nil then
+        raise("Memory domain unavailable: "..tostring(name))
+    end
+
+    return domain
+end
 
 function lock()
     locked = true
@@ -122,14 +175,14 @@ request_handlers = {
         local res = {}
 
         res["type"] = "MEMORY_SIZE_RESPONSE"
-        res["value"] = memory_domains[req["domain"]]:size()
+        res["value"] = get_memory_domain(req["domain"]):size()
         return res
     end,
 
     ["GUARD"] = function (req)
         local expected_data = base64.decode(req["expected_data"])
 
-        local s = memory_domains[req["domain"]]:readRange(req["address"], #expected_data)
+        local s = get_memory_domain(req["domain"]):readRange(req["address"], #expected_data)
         local actual_data = {}
         for i = 1, #s do
             actual_data[i] = s:byte(i)
@@ -167,7 +220,7 @@ request_handlers = {
     end,
 
     ["READ"] = function (req)
-        local s = memory_domains[req["domain"]]:readRange(req["address"], req["size"])
+        local s = get_memory_domain(req["domain"]):readRange(req["address"], req["size"])
         local d = {}
         for i = 1, #s do
             d[i] = s:byte(i)
@@ -180,8 +233,9 @@ request_handlers = {
     end,
 
     ["WRITE"] = function (req)
+        local domain = get_memory_domain(req["domain"])
         for i, byte in ipairs(base64.decode(req["value"])) do
-            memory_domains[req["domain"]]:write8(req["address"] + (i - 1), byte)
+            domain:write8(req["address"] + (i - 1), byte)
         end
 
         return {
@@ -306,37 +360,6 @@ function accept()
 end
 
 function tick()
-    if platform ~= emu:platform() then
-        platform = emu:platform()
-
-        if platform == C.PLATFORM.GB then
-            memory_domains = {
-                ["ROM"] = emu.memory.cart0,
-                ["VRAM"] = emu.memory.vram,
-                ["SRAM"] = emu.memory.sram,
-                ["CartRAM"] = emu.memory.sram,
-                ["WRAM"] = emu.memory.wram,
-                ["OAM"] = emu.memory.oam,
-                ["IO"] = emu.memory.io,
-                ["HRAM"] = emu.memory.hram,
-                ["System Bus"] = emu
-            }
-        else
-            memory_domains = {
-                ["BIOS"] = emu.memory.bios,
-                ["ROM"] = emu.memory.cart0,
-                ["EWRAM"] = emu.memory.wram,
-                ["IWRAM"] = emu.memory.iwram,
-                ["VRAM"] = emu.memory.vram,
-                ["OAM"] = emu.memory.oam,
-                ["Combined WRAM"] = emu.memory.wram,
-                ["System Bus"] = emu,
-                -- ["SRAM"] = emu.memory.cart0,
-                -- ["PALRAM"] = emu.memory.cart0,
-            }
-        end
-    end
-
     if client == nil then
         if server == nil then
             create_server()
