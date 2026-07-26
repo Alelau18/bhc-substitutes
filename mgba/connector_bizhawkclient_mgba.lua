@@ -146,6 +146,71 @@ function get_memory_domain_size(name)
     return get_memory_domain(name):size()
 end
 
+-- Works around stale GBC WRAM geometry after a ROM swap.
+--
+-- Same mGBA defect as the ROM size above: the descriptors are snapshotted before
+-- the core's first reset, while the core still holds the init-time DMG table. For
+-- WRAM that means 0x2000 and unbanked instead of CGB's 0x8000 across 8 banks, so
+-- every address >= 0x1000 lands in the wrong bank. Reads still succeed, which is
+-- why this is invisible: a client's guards simply never match again.
+--
+-- The stale descriptor resolves request R as rawRead8(0xC000 + R % 0x2000,
+-- segment = R / 0x2000); a healthy one resolves linear A as
+-- rawRead8(0xD000 + A % 0x1000, segment = A / 0x1000). Solving for R gives
+-- bank*0x2000 + 0x1000 + offset, so the byte is still reachable, just under a
+-- different number. Measured on a swapped session: 0x1CAB read 00 while the real
+-- value sat at 0x3CAB; with this proxy 0x1CAB reads 01 again.
+--
+-- Engages on a CGB-flagged cart whose WRAM descriptor is the DMG size. Besides
+-- the stale case, a healthy session can hit that by forcing a DMG or SGB model
+-- on a CGB-enhanced cart; the translation stays correct there for the 8 KiB
+-- such a session actually banks (bank 1 lives at segment 1 under either
+-- descriptor -- GBView8 reads the 0xD000 region as wram[segment * 0x1000 +
+-- offset]), so the only misreport in that configuration is size(). For real
+-- CGB sessions the stale case disappears once mGBA rebuilds descriptors on
+-- reset (fixed for 0.11.0).
+function gb_wram_proxy(domain)
+    local is_cgb = (emu.memory.cart0:read8(0x143) & 0x80) ~= 0
+
+    if not is_cgb or domain:size() ~= 0x2000 then
+        return domain
+    end
+
+    local function translate(address)
+        local bank = address >> 12
+
+        if bank == 0 then
+            return address
+        end
+
+        return (bank << 13) + 0x1000 + (address & 0xFFF)
+    end
+
+    return {
+        size = function(self) return 0x8000 end,
+        read8 = function(self, address) return domain:read8(translate(address)) end,
+        write8 = function(self, address, value)
+            return domain:write8(translate(address), value)
+        end,
+        -- Addresses stay contiguous under translation within one bank, so read
+        -- whole runs and only break at bank boundaries.
+        readRange = function(self, address, length)
+            local parts = {}
+
+            while length > 0 do
+                local chunk = 0x1000 - (address & 0xFFF)
+                if chunk > length then chunk = length end
+
+                parts[#parts + 1] = domain:readRange(translate(address), chunk)
+                address = address + chunk
+                length = length - chunk
+            end
+
+            return table.concat(parts)
+        end,
+    }
+end
+
 -- Resolves a domain against whichever core is loaded right now. Raises on an
 -- unknown or unavailable domain; process_request turns that into an ERROR.
 function get_memory_domain(name)
@@ -166,6 +231,10 @@ function get_memory_domain(name)
     local domain = emu.memory[key]
     if domain == nil then
         raise("Memory domain unavailable: "..tostring(name))
+    end
+
+    if key == "wram" and emu:platform() == C.PLATFORM.GB then
+        return gb_wram_proxy(domain)
     end
 
     return domain
